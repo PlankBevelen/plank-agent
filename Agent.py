@@ -7,7 +7,7 @@ from Search import search
 from Tool import Tool
 from ToolChain import ToolChain
 from ToolExecutor import ToolExecutor
-from constant import get_react_max_steps
+from Constant import get_react_max_steps
 
 class Agent:
     def __init__(self, name: str):

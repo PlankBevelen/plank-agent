@@ -5,7 +5,7 @@ from typing import Optional
 
 import chromadb
 import torch
-from constant import get_embedding_device, get_embedding_model_path
+from Constant import get_embedding_device, get_embedding_model_path
 from sentence_transformers import SentenceTransformer
 
 logging.getLogger("sentence_transformers").setLevel(logging.ERROR)

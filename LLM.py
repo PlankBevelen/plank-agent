@@ -1,8 +1,5 @@
-﻿import os
-
-from openai import OpenAI
-
-from constant import get_llm_api_base_url, get_llm_api_key, get_llm_model
+﻿from openai import OpenAI
+from Constant import get_llm_api_base_url, get_llm_api_key, get_llm_model
 
 
 class LLM:

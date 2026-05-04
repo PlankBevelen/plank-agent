@@ -92,3 +92,19 @@ class Agent:
         print(f"Answer: {final_answer}")
         print(f"Elapsed: {int((perf_counter() - start)*1000)} ms")
         return final_answer
+
+if __name__ == "__main__":
+    try:
+        agent = Agent("PlankAgent")
+        print("Agent started. Type your question, or 'exit' to quit.")
+        while True:
+            user_input = input("Question (or 'exit'): ").strip()
+            if user_input.lower() == "exit":
+                print("Agent exited.")
+                break
+            if not user_input:
+                continue
+            agent.run(user_input)
+    except Exception as e:
+        print(f"Agent startup failed: {e}")
+        print("Check your local model settings in .env, then rerun `python Agent.py`.")

@@ -4,9 +4,8 @@ from dotenv import load_dotenv
 
 load_dotenv(override=False)
 
-DEFAULT_LLM_DEVICE = "auto"
-DEFAULT_LLM_QUANTIZATION = "none"
-DEFAULT_LOCAL_MODEL_REPO = "Qwen/Qwen2.5-1.5B-Instruct"
+DEFAULT_LLM_API_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+DEFAULT_LLM_MODEL = "deepseek-v3-2-251201"
 
 TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 
@@ -26,28 +25,35 @@ def get_env_bool(name: str, default: bool = False) -> bool:
   return value.strip().lower() in TRUE_VALUES
 
 
-def get_llm_device() -> str:
-  return get_env("PLANK_LLM_DEVICE", DEFAULT_LLM_DEVICE).lower()
+def get_first_env(names: list[str], default: str = "") -> str:
+  for name in names:
+    value = os.getenv(name)
+    if value is None:
+      continue
+    value = value.strip()
+    if value:
+      return value
+  return default
+
+
+def get_llm_api_base_url() -> str:
+  return get_first_env(
+    ["PLANK_LLM_API_BASE_URL", "ARK_BASE_URL", "OPENAI_BASE_URL"],
+    DEFAULT_LLM_API_BASE_URL,
+  )
+
+
+def get_llm_api_key() -> str:
+  return get_first_env(["PLANK_LLM_API_KEY", "OPENAI_API_KEY"], "")
+
+
+def get_llm_model() -> str:
+  return get_first_env(["PLANK_LLM_MODEL", "ARK_MODEL", "OPENAI_MODEL"], DEFAULT_LLM_MODEL)
 
 
 def get_embedding_model_path() -> str:
   default = os.path.join(os.path.dirname(__file__), "models", "paraphrase-multilingual-MiniLM-L12-v2")
   return get_env("PLANK_EMBEDDING_MODEL_PATH", default)
-
-def get_llm_quantization() -> str:
-  return get_env("PLANK_LLM_QUANTIZATION", DEFAULT_LLM_QUANTIZATION).lower()
-
-
-def get_local_model_repo() -> str:
-  return get_env("PLANK_LOCAL_MODEL_REPO", DEFAULT_LOCAL_MODEL_REPO)
-
-
-def get_local_model_path(default_path: str) -> str:
-  return get_env("PLANK_LOCAL_MODEL_PATH", default_path)
-
-
-def get_auto_download_local_model() -> bool:
-  return get_env_bool("PLANK_AUTO_DOWNLOAD_LOCAL_MODEL", True)
 
 
 def get_embedding_device(default_device: str) -> str:

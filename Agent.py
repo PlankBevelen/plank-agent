@@ -107,4 +107,4 @@ if __name__ == "__main__":
             agent.run(user_input)
     except Exception as e:
         print(f"Agent startup failed: {e}")
-        print("Check your local model settings in .env, then rerun `python Agent.py`.")
+        print("Check your LLM API settings in .env, then rerun `python Agent.py`.")

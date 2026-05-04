@@ -6,3 +6,4 @@ torch==2.8.0
 transformers==5.5.4
 python-dotenv>=1.0.1
 huggingface_hub>=0.24.0
+openai>=1.30.0

@@ -1,0 +1,92 @@
+{
+  "summary": {
+    "total_samples": 3,
+    "exact_matches": 0,
+    "exact_match_rate": 0.0,
+    "avg_steps": 1,
+    "avg_latency_ms": 3710,
+    "avg_tool_calls": 0
+  },
+  "level_metrics": {
+    "1": {
+      "total": 2,
+      "exact_matches": 0,
+      "exact_match_rate": 0.0,
+      "avg_steps": 1,
+      "avg_latency_ms": 3913.5
+    },
+    "2": {
+      "total": 1,
+      "exact_matches": 0,
+      "exact_match_rate": 0.0,
+      "avg_steps": 1,
+      "avg_latency_ms": 3303
+    }
+  },
+  "degradation": [
+    {
+      "from_level": 1,
+      "to_level": 2,
+      "drop": 0.0
+    }
+  ],
+  "records": [
+    {
+      "id": "1",
+      "level": 1,
+      "question": "2 + 2 等于多少？",
+      "gold_answer": "4",
+      "pred_answer": "2 + 2 等于 4。",
+      "match": false,
+      "elapsed_ms": 3894,
+      "steps": 1,
+      "tool_calls": 0,
+      "trace": [
+        {
+          "step": 1,
+          "decision": "2 + 2 等于 4。",
+          "action": null,
+          "observation": null
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "level": 2,
+      "question": "请简短解释什么是向量数据库。",
+      "gold_answer": "向量数据库用于存储和检索向量表示，常用于语义检索和RAG。",
+      "pred_answer": "向量数据库是一种专门用于存储、索引和检索高维向量（即数值数组）的数据库。它通过计算向量之间的相似度（如余弦相似度）来快速找到与查询向量最接近的数据，常用于支持机器学习应用，如语义搜索、推荐系统和图像识别。",
+      "match": false,
+      "elapsed_ms": 3303,
+      "steps": 1,
+      "tool_calls": 0,
+      "trace": [
+        {
+          "step": 1,
+          "decision": "向量数据库是一种专门用于存储、索引和检索高维向量（即数值数组）的数据库。它通过计算向量之间的相似度（如余弦相似度）来快速找到与查询向量最接近的数据，常用于支持机器学习应用，如语义搜索、推荐系统和图像识别。",
+          "action": null,
+          "observation": null
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "level": 1,
+      "question": "Python 里 list 和 tuple 的一个核心区别是什么？",
+      "gold_answer": "list 可变，tuple 不可变。",
+      "pred_answer": "Python 中 list 和 tuple 的一个核心区别是：list 是可变（mutable）的，创建后可以修改、添加或删除元素；而 tuple 是不可变（immutable）的，一旦创建就不能更改其内容。这使得 tuple 更适合用作字典的键或需要保证数据不被意外修改的场景。",
+      "match": false,
+      "elapsed_ms": 3933,
+      "steps": 1,
+      "tool_calls": 0,
+      "trace": [
+        {
+          "step": 1,
+          "decision": "Python 中 list 和 tuple 的一个核心区别是：list 是可变（mutable）的，创建后可以修改、添加或删除元素；而 tuple 是不可变（immutable）的，一旦创建就不能更改其内容。这使得 tuple 更适合用作字典的键或需要保证数据不被意外修改的场景。",
+          "action": null,
+          "observation": null
+        }
+      ]
+    }
+  ]
+}

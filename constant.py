@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 from dotenv import load_dotenv
 
@@ -63,6 +63,42 @@ def get_embedding_device(default_device: str) -> str:
 def get_serpapi_key() -> str:
   return get_env("SERPAPI_KEY", "")
 
+
 def get_react_max_steps() -> int:
   return int(get_env("PLANK_REACT_MAX_STEPS", "5"))
-  # 防止死循环
+
+
+def get_context_max_history_turns() -> int:
+  return int(get_env("PLANK_CONTEXT_MAX_HISTORY_TURNS", "4"))
+
+
+def get_context_max_chars() -> int:
+  return int(get_env("PLANK_CONTEXT_MAX_CHARS", "5000"))
+
+
+def get_context_max_kb_items() -> int:
+  return int(get_env("PLANK_CONTEXT_MAX_KB_ITEMS", "3"))
+
+
+def get_context_max_memory_items() -> int:
+  return int(get_env("PLANK_CONTEXT_MAX_MEMORY_ITEMS", "4"))
+
+
+def get_memory_collection_name() -> str:
+  return get_env("PLANK_MEMORY_COLLECTION", "agent_memory")
+
+
+def get_memory_db_path() -> str:
+  return get_env("PLANK_MEMORY_DB_PATH", "./chroma_db")
+
+
+def get_memory_threshold() -> float:
+  return float(get_env("PLANK_MEMORY_THRESHOLD", "0.65"))
+
+
+def get_memory_top_k() -> int:
+  return int(get_env("PLANK_MEMORY_TOP_K", "6"))
+
+
+def get_memory_write_enabled() -> bool:
+  return get_env_bool("PLANK_MEMORY_WRITE_ENABLED", True)

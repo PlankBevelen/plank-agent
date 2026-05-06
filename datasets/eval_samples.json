@@ -1,0 +1,23 @@
+[
+  {
+    "id": "1",
+    "question": "2 + 2 等于多少？",
+    "answer": "4",
+    "level": 1,
+    "tags": ["math", "basic"]
+  },
+  {
+    "id": "2",
+    "question": "请简短解释什么是向量数据库。",
+    "answer": "向量数据库用于存储和检索向量表示，常用于语义检索和RAG。",
+    "level": 2,
+    "tags": ["ai", "concept"]
+  },
+  {
+    "id": "3",
+    "question": "Python 里 list 和 tuple 的一个核心区别是什么？",
+    "answer": "list 可变，tuple 不可变。",
+    "level": 1,
+    "tags": ["python"]
+  }
+]

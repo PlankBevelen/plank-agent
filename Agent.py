@@ -59,8 +59,14 @@ class Agent:
         self.executor = ToolExecutor()
         self.executor.register(Tool("Search", "Web search via SerpAPI.", search))
 
-        system_prompt = self.prompt.load("system")
-        self.messages = [{"role": "system", "content": system_prompt}]
+        self.system_prompt = self.prompt.load("system")
+        self.messages = [{"role": "system", "content": self.system_prompt}]
+
+    def _llm_messages(self, user_prompt: str) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
     def _parse_action(self, text: str) -> tuple[str, str] | None:
         """Parse `Action: ToolName[query]` from model output."""
@@ -120,7 +126,7 @@ class Agent:
                 observations=obs_text,
             )
             decision = self.llm.think(
-                [{"role": "user", "content": decision_prompt}],
+                self._llm_messages(decision_prompt),
                 temperature=0,
                 max_new_tokens=96,
                 stream_output=not silent,
@@ -162,7 +168,7 @@ class Agent:
                 search_result="\n".join(observations),
             )
             final_answer = self.llm.think(
-                [{"role": "user", "content": answer_prompt}],
+                self._llm_messages(answer_prompt),
                 stream_output=not silent,
             )
 
@@ -213,7 +219,7 @@ class Agent:
         def _stream_from_prompt(prompt_name: str, **kwargs) -> Iterator[str]:
             prompt_text = self.prompt.load(prompt_name, **kwargs)
             for delta in self.llm.stream_think(
-                [{"role": "user", "content": prompt_text}],
+                self._llm_messages(prompt_text),
                 stream_output=False,
             ):
                 yield delta
@@ -232,7 +238,7 @@ class Agent:
                 observations=obs_text,
             )
             decision = self.llm.think(
-                [{"role": "user", "content": decision_prompt}],
+                self._llm_messages(decision_prompt),
                 temperature=0,
                 max_new_tokens=96,
                 stream_output=False,
@@ -279,7 +285,7 @@ class Agent:
             )
             collected: list[str] = []
             for delta in self.llm.stream_think(
-                [{"role": "user", "content": answer_prompt}],
+                self._llm_messages(answer_prompt),
                 stream_output=False,
             ):
                 collected.append(delta)

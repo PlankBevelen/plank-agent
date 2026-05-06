@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from threading import Lock
 from typing import Any, Optional
 
 import chromadb
@@ -83,16 +84,41 @@ def _ensure_local_tokenizer(model_name_or_path: str) -> str:
 
 
 class KnowledgeBase:
+  _shared_embedder: Optional[SentenceTransformer] = None
+  _shared_embedder_lock = Lock()
+  _shared_embedder_path: Optional[str] = None
+  _shared_embedder_device: Optional[str] = None
+
+  @classmethod
+  def _get_shared_embedder(cls, embedding_model_path: str, device: str) -> SentenceTransformer:
+    if (
+      cls._shared_embedder is not None
+      and cls._shared_embedder_path == embedding_model_path
+      and cls._shared_embedder_device == device
+    ):
+      return cls._shared_embedder
+
+    with cls._shared_embedder_lock:
+      if (
+        cls._shared_embedder is None
+        or cls._shared_embedder_path != embedding_model_path
+        or cls._shared_embedder_device != device
+      ):
+        cls._shared_embedder = SentenceTransformer(
+          embedding_model_path,
+          device=device,
+          local_files_only=True,
+        )
+        cls._shared_embedder_path = embedding_model_path
+        cls._shared_embedder_device = device
+    return cls._shared_embedder
+
   def __init__(self, db_path: str = "./chroma_db", collection_name: str = "plankbevelen"):
     self.client = chromadb.PersistentClient(path=db_path)
     self.collection = self.client.get_or_create_collection(collection_name)
     self.device = get_embedding_device("cuda" if torch.cuda.is_available() else "cpu")
     embedding_model_path = _ensure_local_tokenizer(get_embedding_model_path())
-    self.embedder = SentenceTransformer(
-      embedding_model_path,
-      device=self.device,
-      local_files_only=True,
-    )
+    self.embedder = self._get_shared_embedder(embedding_model_path, self.device)
     self.query_embedding_cache: dict[str, list[float]] = {}
 
   def _encode(self, text: str) -> list[float]:

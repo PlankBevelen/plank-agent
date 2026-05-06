@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+from threading import Lock
 from time import perf_counter
 
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -27,6 +28,8 @@ agent_store = SessionAgentStore(
 )
 session_limiter = FixedWindowRateLimiter(max_requests=20, window_seconds=60)
 ip_limiter = FixedWindowRateLimiter(max_requests=100, window_seconds=60)
+_startup_lock = Lock()
+_startup_done = False
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -63,6 +66,8 @@ def _prewarm_agent_if_enabled() -> None:
     prewarm_session_id = os.getenv("PLANK_AGENT_PREWARM_SESSION_ID", "__prewarm__")
     started = perf_counter()
     try:
+        # Preload shared KB/tokenizer once for all sessions.
+        Agent.prewarm()
         agent_store.get_or_create(prewarm_session_id)
         elapsed_ms = int((perf_counter() - started) * 1000)
         logger.info(
@@ -124,11 +129,21 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
-@app.before_serving
-def startup() -> None:
-    if not _should_run_startup_hook():
+def _run_startup_once() -> None:
+    global _startup_done
+    if _startup_done:
         return
-    _prewarm_agent_if_enabled()
+    with _startup_lock:
+        if _startup_done:
+            return
+        if _should_run_startup_hook():
+            _prewarm_agent_if_enabled()
+        _startup_done = True
+
+
+@app.before_request
+def startup() -> None:
+    _run_startup_once()
 
 
 @app.post("/chat")
@@ -181,6 +196,8 @@ def chat():
     def event_stream():
         chunks = 0
         try:
+            # Some proxies buffer tiny chunks; an initial SSE comment helps flush early.
+            yield ": stream-start\n\n"
             with session_lock:
                 for delta in agent.run_stream(
                     user_input=user_message,
@@ -214,4 +231,5 @@ def chat():
 
 
 if __name__ == "__main__":
+    _run_startup_once()
     app.run(host="0.0.0.0", port=6543)

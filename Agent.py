@@ -1,4 +1,5 @@
 ﻿import re
+from threading import Lock
 from time import perf_counter
 from typing import Iterator
 
@@ -14,6 +15,36 @@ from ToolExecutor import ToolExecutor
 
 
 class Agent:
+    _shared_kb = None
+    _shared_kb_lock = Lock()
+
+    @classmethod
+    def _get_shared_kb(cls) -> KnowledgeBase:
+        if cls._shared_kb is not None:
+            return cls._shared_kb
+        with cls._shared_kb_lock:
+            if cls._shared_kb is None:
+                cls._shared_kb = KnowledgeBase(collection_name="plankbevelen")
+        return cls._shared_kb
+
+    @classmethod
+    def prewarm(cls) -> None:
+        cls._get_shared_kb()
+
+    def _retrieve_kb_results(self, user_input: str, top_k: int = 4) -> list[str]:
+        # Phase 1: strict retrieval keeps precision.
+        strict = self.kb.search(user_input, top_k=top_k, threshold=0.55)
+        if strict:
+            return strict
+
+        # Phase 2: fallback retrieval avoids empty-context responses.
+        relaxed = self.kb.search_with_meta(
+            query=user_input,
+            top_k=top_k,
+            threshold=1.25,
+        )
+        return [item.get("text", "") for item in relaxed if item.get("text")]
+
     def __init__(self, name: str, user_id: str = "default_user"):
         self.name = name
         self.user_id = user_id
@@ -21,7 +52,7 @@ class Agent:
         self.llm = LLM()
         self.prompt = PromptLoader()
 
-        self.kb = KnowledgeBase(collection_name="plankbevelen")
+        self.kb = self._get_shared_kb()
         self.memory = MemoryManager()
         self.context_builder = ContextBuilder()
 
@@ -47,7 +78,7 @@ class Agent:
         )
 
     def _build_context(self, user_input: str, observations: list[str], include_memory: bool = True) -> str:
-        kb_results = self.kb.search(user_input, top_k=3, threshold=0.5)
+        kb_results = self._retrieve_kb_results(user_input, top_k=4)
         memory_text = self._build_memory_context(user_input) if include_memory else ""
         pack = self.context_builder.build(
             user_input=user_input,
@@ -179,6 +210,14 @@ class Agent:
         observations: list[str] = []
         final_answer = None
 
+        def _stream_from_prompt(prompt_name: str, **kwargs) -> Iterator[str]:
+            prompt_text = self.prompt.load(prompt_name, **kwargs)
+            for delta in self.llm.stream_think(
+                [{"role": "user", "content": prompt_text}],
+                stream_output=False,
+            ):
+                yield delta
+
         for _step in range(get_react_max_steps()):
             step_context = self._build_context(
                 user_input=user_input,
@@ -201,7 +240,31 @@ class Agent:
 
             action = self._parse_action(decision)
             if action is None:
-                final_answer = decision
+                # Even when no tool call is needed, generate the final answer via
+                # streaming so the UI can render token-by-token instead of one-shot.
+                kb_results = self._retrieve_kb_results(user_input, top_k=4)
+                memory_text = self._build_memory_context(user_input) if include_memory else ""
+                pack = self.context_builder.build(
+                    user_input=user_input,
+                    messages=self.messages,
+                    kb_results=kb_results,
+                    memory_text=memory_text,
+                    observations=observations,
+                )
+
+                streamed_answer = []
+                for delta in _stream_from_prompt(
+                    "answer",
+                    user_input=pack.final_context,
+                    kb_context=pack.kb_text,
+                ):
+                    streamed_answer.append(delta)
+                    yield delta
+
+                final_answer = "".join(streamed_answer).strip() or decision
+                if not streamed_answer and final_answer:
+                    # Fallback safety: ensure client still receives visible content.
+                    yield final_answer
                 break
 
             tool_name, query = action
@@ -222,8 +285,6 @@ class Agent:
                 collected.append(delta)
                 yield delta
             final_answer = "".join(collected)
-        else:
-            yield final_answer
 
         self.messages.append({"role": "user", "content": user_input})
         self.messages.append({"role": "assistant", "content": final_answer})

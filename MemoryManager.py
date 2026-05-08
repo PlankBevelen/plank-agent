@@ -1,5 +1,6 @@
-﻿import hashlib
+import hashlib
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any, Optional
 
 from Constant import (
@@ -13,6 +14,49 @@ from KnowledgeBase import KnowledgeBase
 
 
 class MemoryManager:
+  _shared_instances: dict[tuple[str, str, int, float, bool], "MemoryManager"] = {}
+  _shared_instances_lock = Lock()
+
+  @classmethod
+  def get_shared(
+    cls,
+    db_path: Optional[str] = None,
+    collection_name: Optional[str] = None,
+    top_k: Optional[int] = None,
+    threshold: Optional[float] = None,
+    write_enabled: Optional[bool] = None,
+  ) -> "MemoryManager":
+    resolved_db_path = db_path or get_memory_db_path()
+    resolved_collection = collection_name or get_memory_collection_name()
+    resolved_top_k = top_k if top_k is not None else get_memory_top_k()
+    resolved_threshold = threshold if threshold is not None else get_memory_threshold()
+    resolved_write_enabled = (
+      write_enabled if write_enabled is not None else get_memory_write_enabled()
+    )
+    key = (
+      resolved_db_path,
+      resolved_collection,
+      resolved_top_k,
+      resolved_threshold,
+      resolved_write_enabled,
+    )
+    instance = cls._shared_instances.get(key)
+    if instance is not None:
+      return instance
+
+    with cls._shared_instances_lock:
+      instance = cls._shared_instances.get(key)
+      if instance is None:
+        instance = cls(
+          db_path=resolved_db_path,
+          collection_name=resolved_collection,
+          top_k=resolved_top_k,
+          threshold=resolved_threshold,
+          write_enabled=resolved_write_enabled,
+        )
+        cls._shared_instances[key] = instance
+    return instance
+
   def __init__(
     self,
     kb: Optional[KnowledgeBase] = None,
@@ -114,7 +158,25 @@ class MemoryManager:
         importance = float(importance)
       except Exception:
         importance = 0.5
-      score = 0.75 * float(item.get("score", 0.0)) + 0.25 * self._normalize_importance(importance)
+
+      created_at = metadata.get("created_at", "")
+      recency_bonus = 0.0
+      if created_at:
+        try:
+          created_at_dt = datetime.fromisoformat(str(created_at))
+          age_seconds = max(
+            0.0,
+            (datetime.now(timezone.utc) - created_at_dt.astimezone(timezone.utc)).total_seconds(),
+          )
+          recency_bonus = max(0.0, min(0.1, 0.1 * (1.0 / (1.0 + age_seconds / 86400.0))))
+        except Exception:
+          recency_bonus = 0.0
+
+      score = (
+        0.7 * float(item.get("score", 0.0))
+        + 0.25 * self._normalize_importance(importance)
+        + 0.05 * recency_bonus
+      )
       new_item = dict(item)
       new_item["rank_score"] = score
       ranked.append(new_item)

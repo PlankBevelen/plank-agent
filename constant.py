@@ -102,3 +102,11 @@ def get_memory_top_k() -> int:
 
 def get_memory_write_enabled() -> bool:
   return get_env_bool("PLANK_MEMORY_WRITE_ENABLED", True)
+
+
+def get_kb_query_cache_max_size() -> int:
+  return int(get_env("PLANK_KB_QUERY_CACHE_MAX_SIZE", "1024"))
+
+
+def get_kb_query_cache_ttl_seconds() -> int:
+  return int(get_env("PLANK_KB_QUERY_CACHE_TTL_SECONDS", "3600"))

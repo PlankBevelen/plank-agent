@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
@@ -18,16 +18,32 @@ from Agent import Agent  # noqa: E402
 from rate_limiter import FixedWindowRateLimiter  # noqa: E402
 from session_agent_store import SessionAgentStore  # noqa: E402
 
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("plank-agent-flask")
 
-agent_store = SessionAgentStore(
-    factory=lambda session_id: Agent(name="PlankAgent", user_id=session_id),
-    ttl_seconds=1800,
-)
-session_limiter = FixedWindowRateLimiter(max_requests=20, window_seconds=60)
-ip_limiter = FixedWindowRateLimiter(max_requests=100, window_seconds=60)
+def _configure_logging() -> logging.Logger:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
+        force=True,
+    )
+    root_logger = logging.getLogger()
+    werkzeug_logger = logging.getLogger("werkzeug")
+    flask_app_logger = logging.getLogger("plank-agent-flask")
+
+    werkzeug_logger.setLevel(logging.INFO)
+    werkzeug_logger.propagate = True
+
+    flask_app_logger.setLevel(logging.INFO)
+    flask_app_logger.propagate = True
+
+    if not flask_app_logger.handlers:
+        for handler in root_logger.handlers:
+            flask_app_logger.addHandler(handler)
+
+    return flask_app_logger
+
+
+app = Flask(__name__)
+logger = _configure_logging()
 _startup_lock = Lock()
 _startup_done = False
 
@@ -37,6 +53,24 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
+def _env_str(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value or default
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -51,8 +85,41 @@ def _as_bool(value: object, default: bool = False) -> bool:
     return default
 
 
+def _build_session_store() -> SessionAgentStore:
+    return SessionAgentStore(
+        ttl_seconds=_env_int("PLANK_SESSION_TTL_SECONDS", 1800),
+        cleanup_interval_seconds=_env_int("PLANK_SESSION_CLEANUP_INTERVAL_SECONDS", 300),
+        backend=_env_str("PLANK_SESSION_BACKEND", "memory"),
+        redis_url=_env_str("PLANK_REDIS_URL", ""),
+        key_prefix=_env_str("PLANK_SESSION_KEY_PREFIX", "plank-agent:session"),
+        lock_timeout_seconds=_env_int("PLANK_SESSION_LOCK_TIMEOUT_SECONDS", 30),
+        lock_blocking_timeout_seconds=_env_int("PLANK_SESSION_LOCK_BLOCKING_TIMEOUT_SECONDS", 15),
+    )
+
+
+def _build_limiter(key_prefix: str, max_requests: int) -> FixedWindowRateLimiter:
+    return FixedWindowRateLimiter(
+        max_requests=max_requests,
+        window_seconds=_env_int("PLANK_RATE_LIMIT_WINDOW_SECONDS", 60),
+        cleanup_interval_seconds=_env_int("PLANK_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS", 300),
+        backend=_env_str("PLANK_RATE_LIMIT_BACKEND", "memory"),
+        redis_url=_env_str("PLANK_REDIS_URL", ""),
+        key_prefix=key_prefix,
+    )
+
+
+agent_store = _build_session_store()
+session_limiter = _build_limiter(
+    key_prefix=_env_str("PLANK_SESSION_RATE_LIMIT_PREFIX", "plank-agent:ratelimit:session"),
+    max_requests=_env_int("PLANK_SESSION_RATE_LIMIT_MAX_REQUESTS", 20),
+)
+ip_limiter = _build_limiter(
+    key_prefix=_env_str("PLANK_IP_RATE_LIMIT_PREFIX", "plank-agent:ratelimit:ip"),
+    max_requests=_env_int("PLANK_IP_RATE_LIMIT_MAX_REQUESTS", 100),
+)
+
+
 def _should_run_startup_hook() -> bool:
-    # In debug reloader mode, only run startup logic in the serving process.
     if app.debug:
         return os.environ.get("WERKZEUG_RUN_MAIN") == "true"
     return True
@@ -66,9 +133,7 @@ def _prewarm_agent_if_enabled() -> None:
     prewarm_session_id = os.getenv("PLANK_AGENT_PREWARM_SESSION_ID", "__prewarm__")
     started = perf_counter()
     try:
-        # Preload shared KB/tokenizer once for all sessions.
         Agent.prewarm()
-        agent_store.get_or_create(prewarm_session_id)
         elapsed_ms = int((perf_counter() - started) * 1000)
         logger.info(
             "agent prewarm ok session_id=%s elapsed_ms=%s",
@@ -126,6 +191,7 @@ def _sse_event(event: str, data: dict) -> str:
 
 @app.get("/health")
 def health():
+    logger.info("health check ip=%s status=200", _client_ip())
     return jsonify({"status": "ok"}), 200
 
 
@@ -152,6 +218,14 @@ def chat():
     session_id = request.headers.get("X-Session-Id", "").strip()
     ip = _client_ip()
 
+    logger.info(
+        "chat request received session_id=%s ip=%s method=%s path=%s",
+        session_id or "(missing)",
+        ip,
+        request.method,
+        request.path,
+    )
+
     if not session_id:
         return _error(400, "missing_session_id", "X-Session-Id is required")
 
@@ -165,58 +239,84 @@ def chat():
         return _error(400, "invalid_request", "JSON field 'message' is required")
 
     want_stream = _as_bool(payload.get("stream"), default=False)
-    agent, session_lock = agent_store.get_or_create(session_id)
+    include_memory = _as_bool(
+        payload.get("include_memory"),
+        default=_env_bool("PLANK_WEB_INCLUDE_MEMORY", True),
+    )
+    persist_memory = _as_bool(
+        payload.get("persist_memory"),
+        default=_env_bool("PLANK_WEB_PERSIST_MEMORY", True),
+    )
 
     if not want_stream:
         try:
-            # Serialize calls per session to protect shared agent state.
-            with session_lock:
+            with agent_store.session_lock(session_id):
+                agent = Agent(name="PlankAgent", user_id=session_id)
+                agent.restore_session_state(agent_store.load_messages(session_id))
                 answer = agent.run(
                     user_input=user_message,
                     return_trace=False,
                     silent=True,
-                    include_memory=False,
-                    persist_memory=False,
+                    include_memory=include_memory,
+                    persist_memory=persist_memory,
                 )
+                agent_store.save_messages(session_id, agent.export_session_state())
         except Exception as exc:
             logger.exception("chat failed session_id=%s ip=%s", session_id, ip)
             return _error(500, "internal_error", f"Chat failed: {exc}")
 
         elapsed_ms = int((perf_counter() - started) * 1000)
         logger.info(
-            "chat ok session_id=%s ip=%s elapsed_ms=%s status=200 stream=%s",
+            "chat ok session_id=%s ip=%s elapsed_ms=%s status=200 stream=%s memory=%s persist_memory=%s",
             session_id,
             ip,
             elapsed_ms,
             False,
+            include_memory,
+            persist_memory,
         )
         return jsonify({"session_id": session_id, "answer": answer, "elapsed_ms": elapsed_ms}), 200
 
     @stream_with_context
     def event_stream():
         chunks = 0
+        first_token_ms: int | None = None
         try:
-            # Some proxies buffer tiny chunks; an initial SSE comment helps flush early.
             yield ": stream-start\n\n"
-            with session_lock:
+            with agent_store.session_lock(session_id):
+                agent = Agent(name="PlankAgent", user_id=session_id)
+                agent.restore_session_state(agent_store.load_messages(session_id))
                 for delta in agent.run_stream(
                     user_input=user_message,
-                    include_memory=False,
-                    persist_memory=False,
+                    include_memory=include_memory,
+                    persist_memory=persist_memory,
                 ):
+                    if first_token_ms is None:
+                        first_token_ms = int((perf_counter() - started) * 1000)
                     chunks += 1
                     yield _sse_event("delta", {"text": delta})
+                agent_store.save_messages(session_id, agent.export_session_state())
 
             elapsed_ms = int((perf_counter() - started) * 1000)
             logger.info(
-                "chat ok session_id=%s ip=%s elapsed_ms=%s status=200 stream=%s chunks=%s",
+                "chat ok session_id=%s ip=%s elapsed_ms=%s first_token_ms=%s status=200 stream=%s chunks=%s memory=%s persist_memory=%s",
                 session_id,
                 ip,
                 elapsed_ms,
+                first_token_ms,
                 True,
                 chunks,
+                include_memory,
+                persist_memory,
             )
-            yield _sse_event("done", {"session_id": session_id, "elapsed_ms": elapsed_ms})
+            yield _sse_event(
+                "done",
+                {
+                    "session_id": session_id,
+                    "elapsed_ms": elapsed_ms,
+                    "first_token_ms": first_token_ms,
+                },
+            )
         except Exception as exc:
             logger.exception("chat stream failed session_id=%s ip=%s", session_id, ip)
             yield _sse_event("error", {"error": "internal_error", "message": f"Chat failed: {exc}"})

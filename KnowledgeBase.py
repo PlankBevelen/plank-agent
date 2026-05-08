@@ -1,12 +1,19 @@
 import json
 import logging
 import os
+from collections import OrderedDict
 from threading import Lock
+from time import time
 from typing import Any, Optional
 
 import chromadb
 import torch
-from Constant import get_embedding_device, get_embedding_model_path
+from Constant import (
+  get_embedding_device,
+  get_embedding_model_path,
+  get_kb_query_cache_max_size,
+  get_kb_query_cache_ttl_seconds,
+)
 from huggingface_hub import snapshot_download
 from sentence_transformers import SentenceTransformer
 
@@ -44,7 +51,6 @@ def _resolve_local_model_dir(model_name_or_path: str) -> tuple[str, str]:
   model_name_or_path = (model_name_or_path or "").strip()
   project_root = os.path.dirname(__file__)
 
-  # If user passes HF repo id directly, cache it under ./models/<repo_name>.
   if "/" in model_name_or_path and not os.path.isabs(model_name_or_path) and "\\" not in model_name_or_path:
     repo_id = model_name_or_path
     model_dir = os.path.join(project_root, "models", repo_id.split("/")[-1])
@@ -88,6 +94,9 @@ class KnowledgeBase:
   _shared_embedder_lock = Lock()
   _shared_embedder_path: Optional[str] = None
   _shared_embedder_device: Optional[str] = None
+  _shared_clients: dict[str, chromadb.PersistentClient] = {}
+  _shared_collections: dict[tuple[str, str], Any] = {}
+  _shared_storage_lock = Lock()
 
   @classmethod
   def _get_shared_embedder(cls, embedding_model_path: str, device: str) -> SentenceTransformer:
@@ -113,13 +122,30 @@ class KnowledgeBase:
         cls._shared_embedder_device = device
     return cls._shared_embedder
 
+  @classmethod
+  def _get_shared_collection(cls, db_path: str, collection_name: str):
+    normalized_path = os.path.abspath(db_path)
+    key = (normalized_path, collection_name)
+    with cls._shared_storage_lock:
+      client = cls._shared_clients.get(normalized_path)
+      if client is None:
+        client = chromadb.PersistentClient(path=normalized_path)
+        cls._shared_clients[normalized_path] = client
+
+      collection = cls._shared_collections.get(key)
+      if collection is None:
+        collection = client.get_or_create_collection(collection_name)
+        cls._shared_collections[key] = collection
+      return client, collection
+
   def __init__(self, db_path: str = "./chroma_db", collection_name: str = "plankbevelen"):
-    self.client = chromadb.PersistentClient(path=db_path)
-    self.collection = self.client.get_or_create_collection(collection_name)
+    self.client, self.collection = self._get_shared_collection(db_path, collection_name)
     self.device = get_embedding_device("cuda" if torch.cuda.is_available() else "cpu")
     embedding_model_path = _ensure_local_tokenizer(get_embedding_model_path())
     self.embedder = self._get_shared_embedder(embedding_model_path, self.device)
-    self.query_embedding_cache: dict[str, list[float]] = {}
+    self.query_embedding_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+    self.query_embedding_cache_max_size = max(1, get_kb_query_cache_max_size())
+    self.query_embedding_cache_ttl_seconds = max(1, get_kb_query_cache_ttl_seconds())
 
   def _encode(self, text: str) -> list[float]:
     return self.embedder.encode(
@@ -127,6 +153,24 @@ class KnowledgeBase:
       show_progress_bar=False,
       convert_to_numpy=True,
     ).tolist()
+
+  def _get_cached_query_embedding(self, query: str) -> list[float]:
+    now = time()
+    cached = self.query_embedding_cache.get(query)
+    if cached is not None:
+      cached_at, embedding = cached
+      if now - cached_at <= self.query_embedding_cache_ttl_seconds:
+        self.query_embedding_cache.move_to_end(query)
+        return embedding
+      self.query_embedding_cache.pop(query, None)
+
+    embedding = self._encode(query)
+    self.query_embedding_cache[query] = (now, embedding)
+    self.query_embedding_cache.move_to_end(query)
+
+    while len(self.query_embedding_cache) > self.query_embedding_cache_max_size:
+      self.query_embedding_cache.popitem(last=False)
+    return embedding
 
   def _existing_doc(self, doc_id: str):
     result = self.collection.get(
@@ -180,11 +224,7 @@ class KnowledgeBase:
     threshold: float = 0.5,
     where: Optional[dict[str, Any]] = None,
   ) -> list[dict[str, Any]]:
-    if query in self.query_embedding_cache:
-      query_embedding = self.query_embedding_cache[query]
-    else:
-      query_embedding = self._encode(query)
-      self.query_embedding_cache[query] = query_embedding
+    query_embedding = self._get_cached_query_embedding(query)
 
     kwargs = {
       "query_embeddings": [query_embedding],

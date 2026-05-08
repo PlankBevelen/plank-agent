@@ -1,5 +1,6 @@
-﻿import serpapi
-from Constant import get_serpapi_key
+import serpapi
+
+from constant import get_serpapi_key
 
 
 def search(query: str) -> str:

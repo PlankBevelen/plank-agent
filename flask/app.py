@@ -144,11 +144,26 @@ def _prewarm_agent_if_enabled() -> None:
         logger.exception("agent prewarm failed session_id=%s", prewarm_session_id)
 
 
+def _trusted_proxy_ips() -> set[str]:
+    raw = _env_str("PLANK_TRUSTED_PROXY_IPS", "")
+    return {value.strip() for value in raw.split(",") if value.strip()}
+
+
 def _client_ip() -> str:
+    remote_addr = (request.remote_addr or "").strip() or "unknown"
+    if not _env_bool("PLANK_TRUST_PROXY_HEADERS", False):
+        return remote_addr
+
+    trusted_proxies = _trusted_proxy_ips()
+    if trusted_proxies and remote_addr not in trusted_proxies:
+        return remote_addr
+
     forwarded_for = request.headers.get("X-Forwarded-For", "")
     if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    return request.remote_addr or "unknown"
+        client_ip = forwarded_for.split(",")[0].strip()
+        if client_ip:
+            return client_ip
+    return remote_addr
 
 
 def _error(status_code: int, error: str, message: str):

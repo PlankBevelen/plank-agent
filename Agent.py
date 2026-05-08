@@ -1,11 +1,10 @@
-import re
-from dataclasses import dataclass
+﻿import re
 from threading import Lock
 from time import perf_counter
 from typing import Iterator
 
 from Constant import get_context_max_memory_items, get_react_max_steps
-from ContextBuilder import ContextBuilder, ContextPack
+from ContextBuilder import ContextBuilder
 from KnowledgeBase import KnowledgeBase
 from LLM import LLM
 from MemoryManager import MemoryManager
@@ -15,28 +14,13 @@ from Tool import Tool
 from ToolExecutor import ToolExecutor
 
 
-@dataclass
-class ReactLoopResult:
-    observations: list[str]
-    step_traces: list[dict]
-    planner_note: str | None
-    used_tools: bool
-
-
-@dataclass
-class TurnPreparation:
-    loop_result: ReactLoopResult
-    context_pack: ContextPack
-    prompt_name: str
-    prompt_text: str
-
-
 class Agent:
     _shared_kb = None
     _shared_kb_lock = Lock()
 
     @classmethod
     def _get_shared_kb(cls) -> KnowledgeBase:
+        """ 获取共享的知识库实例。 """
         if cls._shared_kb is not None:
             return cls._shared_kb
         with cls._shared_kb_lock:
@@ -47,12 +31,14 @@ class Agent:
     @classmethod
     def prewarm(cls) -> None:
         cls._get_shared_kb()
-
     def _retrieve_kb_results(self, user_input: str, top_k: int = 4) -> list[str]:
+        """ 从知识库中检索结果，优先使用严格检索，若失败则使用回退检索。 """
+        # 1: 严格检索保持精度，避免空上下文响应.
         strict = self.kb.search(user_input, top_k=top_k, threshold=0.55)
         if strict:
             return strict
 
+        # 2: 回退检索避免空上下文响应.
         relaxed = self.kb.search_with_meta(
             query=user_input,
             top_k=top_k,
@@ -66,10 +52,9 @@ class Agent:
 
         self.llm = LLM()
         self.prompt = PromptLoader()
-        self.prompt.validate()
 
         self.kb = self._get_shared_kb()
-        self.memory = MemoryManager.get_shared()
+        self.memory = MemoryManager()
         self.context_builder = ContextBuilder()
 
         self.executor = ToolExecutor()
@@ -78,26 +63,6 @@ class Agent:
         self.system_prompt = self.prompt.load("system")
         self.messages = [{"role": "system", "content": self.system_prompt}]
 
-    def export_session_state(self) -> list[dict[str, str]]:
-        return [
-            {
-                "role": str(message.get("role", "")),
-                "content": str(message.get("content", "")),
-            }
-            for message in self.messages
-            if message.get("role") in {"user", "assistant"} and message.get("content")
-        ]
-
-    def restore_session_state(self, messages: list[dict[str, str]] | None) -> None:
-        restored = [{"role": "system", "content": self.system_prompt}]
-        for message in messages or []:
-            role = str(message.get("role", "")).strip()
-            content = str(message.get("content", "")).strip()
-            if role not in {"user", "assistant"} or not content:
-                continue
-            restored.append({"role": role, "content": content})
-        self.messages = restored[:1] + restored[-18:]
-
     def _llm_messages(self, user_prompt: str) -> list[dict[str, str]]:
         return [
             {"role": "system", "content": self.system_prompt},
@@ -105,6 +70,7 @@ class Agent:
         ]
 
     def _parse_action(self, text: str) -> tuple[str, str] | None:
+        """Parse `Action: ToolName[query]` from model output."""
         match = re.search(r"Action:\s*(\w+)\[(.+?)\]", text)
         if match:
             return match.group(1), match.group(2)
@@ -119,36 +85,32 @@ class Agent:
         )
 
     def _build_context(self, user_input: str, observations: list[str], include_memory: bool = True) -> str:
-        return self._build_context_pack(
-            user_input=user_input,
-            observations=observations,
-            include_memory=include_memory,
-        ).final_context
-
-    def _build_context_pack(
-        self,
-        user_input: str,
-        observations: list[str],
-        include_memory: bool = True,
-    ) -> ContextPack:
         kb_results = self._retrieve_kb_results(user_input, top_k=4)
         memory_text = self._build_memory_context(user_input) if include_memory else ""
-        return self.context_builder.build(
+        pack = self.context_builder.build(
             user_input=user_input,
             messages=self.messages,
             kb_results=kb_results,
             memory_text=memory_text,
             observations=observations,
         )
+        return pack.final_context
 
-    def _run_react_loop(
+    def run(
         self,
         user_input: str,
-        include_memory: bool = True,
+        return_trace: bool = False,
         silent: bool = False,
-    ) -> ReactLoopResult:
+        include_memory: bool = True,
+        persist_memory: bool = True,
+    ) -> str | dict:
+        start = perf_counter()
+        if not silent:
+            print(f"User: {user_input}")
+
         tool_descriptions = self.executor.describe_all()
         observations: list[str] = []
+        final_answer = None
         step_traces: list[dict] = []
 
         for step in range(get_react_max_steps()):
@@ -160,7 +122,7 @@ class Agent:
             obs_text = "\n".join(f"Observation {i + 1}: {o}" for i, o in enumerate(observations))
             decision_prompt = self.prompt.load(
                 "decision",
-                context=step_context,
+                user_input=step_context,
                 tools=tool_descriptions,
                 observations=obs_text,
             )
@@ -175,6 +137,7 @@ class Agent:
 
             action = self._parse_action(decision)
             if action is None:
+                final_answer = decision
                 step_traces.append(
                     {
                         "step": step + 1,
@@ -183,12 +146,7 @@ class Agent:
                         "observation": None,
                     }
                 )
-                return ReactLoopResult(
-                    observations=observations,
-                    step_traces=step_traces,
-                    planner_note=decision,
-                    used_tools=bool(observations),
-                )
+                break
 
             tool_name, query = action
             if not silent:
@@ -204,52 +162,16 @@ class Agent:
                 }
             )
 
-        return ReactLoopResult(
-            observations=observations,
-            step_traces=step_traces,
-            planner_note=None,
-            used_tools=bool(observations),
-        )
-
-    def _prepare_turn(
-        self,
-        user_input: str,
-        include_memory: bool = True,
-        silent: bool = False,
-    ) -> TurnPreparation:
-        loop_result = self._run_react_loop(
-            user_input=user_input,
-            include_memory=include_memory,
-            silent=silent,
-        )
-        pack = self._build_context_pack(
-            user_input=user_input,
-            observations=loop_result.observations,
-            include_memory=include_memory,
-        )
-        prompt_name = "answer_with_search" if loop_result.used_tools else "answer"
-        prompt_text = self.prompt.load(
-            prompt_name,
-            context=pack.final_context,
-            kb_context=pack.kb_text,
-            search_result="\n".join(loop_result.observations),
-            planner_note=loop_result.planner_note or "",
-        )
-        return TurnPreparation(
-            loop_result=loop_result,
-            context_pack=pack,
-            prompt_name=prompt_name,
-            prompt_text=prompt_text,
-        )
-
-    def _finalize_turn(
-        self,
-        user_input: str,
-        final_answer: str,
-        observations: list[str],
-        persist_memory: bool = True,
-    ) -> str:
-        final_answer = final_answer.strip()
+        if final_answer is None:
+            answer_prompt = self.prompt.load(
+                "answer_with_search",
+                user_input=user_input,
+                search_result="\n".join(observations),
+            )
+            final_answer = self.llm.think(
+                self._llm_messages(answer_prompt),
+                stream_output=not silent,
+            )
 
         self.messages.append({"role": "user", "content": user_input})
         self.messages.append({"role": "assistant", "content": final_answer})
@@ -266,39 +188,6 @@ class Agent:
                 tags=["chat", "react"],
             )
 
-        return final_answer
-
-    def run(
-        self,
-        user_input: str,
-        return_trace: bool = False,
-        silent: bool = False,
-        include_memory: bool = True,
-        persist_memory: bool = True,
-    ) -> str | dict:
-        start = perf_counter()
-        if not silent:
-            print(f"User: {user_input}")
-
-        preparation = self._prepare_turn(
-            user_input=user_input,
-            include_memory=include_memory,
-            silent=silent,
-        )
-        final_answer = self.llm.think(
-            self._llm_messages(preparation.prompt_text),
-            stream_output=not silent,
-        )
-        if not final_answer.strip():
-            final_answer = preparation.loop_result.planner_note or ""
-
-        final_answer = self._finalize_turn(
-            user_input=user_input,
-            final_answer=final_answer,
-            observations=preparation.loop_result.observations,
-            persist_memory=persist_memory,
-        )
-
         elapsed_ms = int((perf_counter() - start) * 1000)
         if not silent:
             print(f"Answer: {final_answer}")
@@ -308,10 +197,10 @@ class Agent:
             return {
                 "answer": final_answer,
                 "elapsed_ms": elapsed_ms,
-                "steps": len(preparation.loop_result.step_traces),
-                "tool_calls": sum(1 for s in preparation.loop_result.step_traces if s.get("action")),
-                "observations": preparation.loop_result.observations,
-                "trace": preparation.loop_result.step_traces,
+                "steps": len(step_traces),
+                "tool_calls": sum(1 for s in step_traces if s.get("action")),
+                "observations": observations,
+                "trace": step_traces,
             }
         return final_answer
 
@@ -324,30 +213,100 @@ class Agent:
         if not user_input:
             return
 
-        preparation = self._prepare_turn(
-            user_input=user_input,
-            include_memory=include_memory,
-            silent=True,
-        )
-        collected: list[str] = []
+        tool_descriptions = self.executor.describe_all()
+        observations: list[str] = []
+        final_answer = None
 
-        for delta in self.llm.stream_think(
-            self._llm_messages(preparation.prompt_text),
-            stream_output=False,
-        ):
-            collected.append(delta)
-            yield delta
+        def _stream_from_prompt(prompt_name: str, **kwargs) -> Iterator[str]:
+            prompt_text = self.prompt.load(prompt_name, **kwargs)
+            for delta in self.llm.stream_think(
+                self._llm_messages(prompt_text),
+                stream_output=False,
+            ):
+                yield delta
 
-        final_answer = "".join(collected).strip() or (preparation.loop_result.planner_note or "")
-        if not collected and final_answer:
-            yield final_answer
+        for _step in range(get_react_max_steps()):
+            step_context = self._build_context(
+                user_input=user_input,
+                observations=observations,
+                include_memory=include_memory,
+            )
+            obs_text = "\n".join(f"Observation {i + 1}: {o}" for i, o in enumerate(observations))
+            decision_prompt = self.prompt.load(
+                "decision",
+                user_input=step_context,
+                tools=tool_descriptions,
+                observations=obs_text,
+            )
+            decision = self.llm.think(
+                self._llm_messages(decision_prompt),
+                temperature=0,
+                max_new_tokens=96,
+                stream_output=False,
+            )
 
-        self._finalize_turn(
-            user_input=user_input,
-            final_answer=final_answer,
-            observations=preparation.loop_result.observations,
-            persist_memory=persist_memory,
-        )
+            action = self._parse_action(decision)
+            if action is None:
+                # Even when no tool call is needed, generate the final answer via
+                # streaming so the UI can render token-by-token instead of one-shot.
+                kb_results = self._retrieve_kb_results(user_input, top_k=4)
+                memory_text = self._build_memory_context(user_input) if include_memory else ""
+                pack = self.context_builder.build(
+                    user_input=user_input,
+                    messages=self.messages,
+                    kb_results=kb_results,
+                    memory_text=memory_text,
+                    observations=observations,
+                )
+
+                streamed_answer = []
+                for delta in _stream_from_prompt(
+                    "answer",
+                    user_input=pack.final_context,
+                    kb_context=pack.kb_text,
+                ):
+                    streamed_answer.append(delta)
+                    yield delta
+
+                final_answer = "".join(streamed_answer).strip() or decision
+                if not streamed_answer and final_answer:
+                    # Fallback safety: ensure client still receives visible content.
+                    yield final_answer
+                break
+
+            tool_name, query = action
+            result = self.executor.run(tool_name, query)
+            observations.append(result)
+
+        if final_answer is None:
+            answer_prompt = self.prompt.load(
+                "answer_with_search",
+                user_input=user_input,
+                search_result="\n".join(observations),
+            )
+            collected: list[str] = []
+            for delta in self.llm.stream_think(
+                self._llm_messages(answer_prompt),
+                stream_output=False,
+            ):
+                collected.append(delta)
+                yield delta
+            final_answer = "".join(collected)
+
+        self.messages.append({"role": "user", "content": user_input})
+        self.messages.append({"role": "assistant", "content": final_answer})
+
+        if len(self.messages) > 20:
+            self.messages = self.messages[:1] + self.messages[-18:]
+
+        if persist_memory:
+            self.memory.save_interaction(
+                user_id=self.user_id,
+                user_input=user_input,
+                assistant_output=final_answer,
+                observations=observations,
+                tags=["chat", "react"],
+            )
 
 
 if __name__ == "__main__":

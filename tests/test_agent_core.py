@@ -1,6 +1,6 @@
 import unittest
 
-from Agent import Agent, ReactLoopResult
+from Agent import Agent, ReactLoopResult, TurnResources
 from ContextBuilder import ContextPack
 
 
@@ -39,6 +39,7 @@ class AgentCoreTests(unittest.TestCase):
     def test_prepare_turn_uses_full_context_for_search_response(self):
         agent = Agent.__new__(Agent)
         agent.prompt = FakePromptLoader()
+        agent._prepare_turn_resources = lambda **_: TurnResources(kb_results=["kb"], memory_text="memory")
         agent._run_react_loop = lambda **_: ReactLoopResult(
             observations=["obs-1"],
             step_traces=[],
@@ -62,6 +63,58 @@ class AgentCoreTests(unittest.TestCase):
         self.assertEqual(kwargs["context"], "FULL_CONTEXT")
         self.assertEqual(kwargs["search_result"], "obs-1")
         self.assertEqual(kwargs["planner_note"], "draft")
+
+    def test_prepare_turn_reuses_turn_resources_across_react_and_final_answer(self):
+        agent = Agent.__new__(Agent)
+        agent.prompt = FakePromptLoader()
+        agent.messages = [{"role": "system", "content": "system"}]
+
+        counts = {"kb": 0, "memory": 0}
+
+        def fake_retrieve(user_input: str, top_k: int = 4):
+            counts["kb"] += 1
+            return ["kb"]
+
+        def fake_memory(user_input: str):
+            counts["memory"] += 1
+            return "memory"
+
+        class FakeContextBuilder:
+            def build(self, **kwargs):
+                return ContextPack(
+                    user_input=kwargs["user_input"],
+                    history_text="history",
+                    kb_text="[KB 1]\nkb",
+                    memory_text=kwargs["memory_text"],
+                    observations_text="",
+                    final_context="FULL_CONTEXT",
+                )
+
+        def fake_run_react_loop(**kwargs):
+            Agent._build_context_pack(
+                agent,
+                user_input=kwargs["user_input"],
+                observations=[],
+                include_memory=kwargs["include_memory"],
+                turn_resources=kwargs["turn_resources"],
+            )
+            return ReactLoopResult(
+                observations=[],
+                step_traces=[],
+                planner_note="draft",
+                used_tools=False,
+            )
+
+        agent._retrieve_kb_results = fake_retrieve
+        agent._build_memory_context = fake_memory
+        agent.context_builder = FakeContextBuilder()
+        agent._run_react_loop = fake_run_react_loop
+
+        preparation = agent._prepare_turn("question", include_memory=True, silent=True)
+
+        self.assertEqual(preparation.prompt_name, "answer")
+        self.assertEqual(counts["kb"], 1)
+        self.assertEqual(counts["memory"], 1)
 
 
 if __name__ == "__main__":

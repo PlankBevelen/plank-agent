@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import chromadb
 import torch
-from Constant import (
+from constant import (
   get_embedding_device,
   get_embedding_model_path,
   get_kb_query_cache_max_size,
@@ -144,6 +144,7 @@ class KnowledgeBase:
     embedding_model_path = _ensure_local_tokenizer(get_embedding_model_path())
     self.embedder = self._get_shared_embedder(embedding_model_path, self.device)
     self.query_embedding_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+    self._query_embedding_cache_lock = Lock()
     self.query_embedding_cache_max_size = max(1, get_kb_query_cache_max_size())
     self.query_embedding_cache_ttl_seconds = max(1, get_kb_query_cache_ttl_seconds())
 
@@ -156,20 +157,30 @@ class KnowledgeBase:
 
   def _get_cached_query_embedding(self, query: str) -> list[float]:
     now = time()
-    cached = self.query_embedding_cache.get(query)
-    if cached is not None:
-      cached_at, embedding = cached
-      if now - cached_at <= self.query_embedding_cache_ttl_seconds:
-        self.query_embedding_cache.move_to_end(query)
-        return embedding
-      self.query_embedding_cache.pop(query, None)
+    with self._query_embedding_cache_lock:
+      cached = self.query_embedding_cache.get(query)
+      if cached is not None:
+        cached_at, embedding = cached
+        if now - cached_at <= self.query_embedding_cache_ttl_seconds:
+          self.query_embedding_cache.move_to_end(query)
+          return embedding
+        self.query_embedding_cache.pop(query, None)
 
     embedding = self._encode(query)
-    self.query_embedding_cache[query] = (now, embedding)
-    self.query_embedding_cache.move_to_end(query)
+    cached_at = time()
+    with self._query_embedding_cache_lock:
+      cached = self.query_embedding_cache.get(query)
+      if cached is not None:
+        previous_cached_at, previous_embedding = cached
+        if cached_at - previous_cached_at <= self.query_embedding_cache_ttl_seconds:
+          self.query_embedding_cache.move_to_end(query)
+          return previous_embedding
 
-    while len(self.query_embedding_cache) > self.query_embedding_cache_max_size:
-      self.query_embedding_cache.popitem(last=False)
+      self.query_embedding_cache[query] = (cached_at, embedding)
+      self.query_embedding_cache.move_to_end(query)
+
+      while len(self.query_embedding_cache) > self.query_embedding_cache_max_size:
+        self.query_embedding_cache.popitem(last=False)
     return embedding
 
   def _existing_doc(self, doc_id: str):

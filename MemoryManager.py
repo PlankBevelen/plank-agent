@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Optional
 
-from Constant import (
+from constant import (
   get_memory_collection_name,
   get_memory_db_path,
   get_memory_threshold,

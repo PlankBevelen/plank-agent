@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from Constant import (
+from constant import (
   get_context_max_chars,
   get_context_max_history_turns,
   get_context_max_kb_items,

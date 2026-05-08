@@ -39,6 +39,7 @@ class AgentEvaluator:
   def evaluate(self, samples: list[EvalSample], include_memory: bool = False) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     for sample in samples:
+      self.agent.reset_session_state()
       trace = self.agent.run(
         sample.question,
         return_trace=True,
